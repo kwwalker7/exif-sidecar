@@ -22,6 +22,17 @@ cat photo.jpg | exifsidecar extract - > photo.jpg.txt
 exifsidecar extract < photo.jpg > photo.jpg.txt
 ```
 
+Write a sidecar's tags back into a JPEG's EXIF data:
+
+```
+exifsidecar embed photo.jpg photo.jpg.txt > new.jpg
+```
+
+One of the two arguments (but not both) can be `-` to read that input
+from stdin. `embed` replaces whatever APP1 Exif segment the JPEG
+already has, or inserts a new one right after the SOI marker if it
+doesn't have one.
+
 Example output:
 
 ```
@@ -48,11 +59,11 @@ go build .
 
 ## Status
 
-Only the JPEG-to-sidecar direction is implemented so far. Writing a
-sidecar file's values back into a JPEG's EXIF data (the other half of
-"converter") is still on the list. See the code for the current tag
-coverage — IFD0 and the Exif SubIFD are handled; GPS tags and
-thumbnail (IFD1) data are not yet.
+Both directions are implemented for IFD0 and the Exif SubIFD. GPS tags
+and thumbnail (IFD1) data are read-only gaps for now: `extract` doesn't
+decode them yet, and `embed` drops the raw `GPSInfoIFDPointer` line
+rather than writing back a GPS IFD it didn't build. MakerNote data is
+also not preserved across an embed.
 
 ## License
 

@@ -139,16 +139,34 @@ func ExtractEXIF(data []byte) ([]Tag, error) {
 // of the first APP1 segment that carries an Exif header, with that header
 // stripped off (so what's returned starts at the TIFF header).
 func findEXIFSegment(data []byte) ([]byte, error) {
+	start, end, err := findEXIFSegmentSpan(data)
+	if err != nil {
+		return nil, err
+	}
+	if start < 0 {
+		return nil, errors.New("no EXIF (APP1) segment found")
+	}
+	// start+2 (marker) +2 (length) +6 ("Exif\0\0") is where the TIFF header begins.
+	return data[start+10 : end], nil
+}
+
+// findEXIFSegmentSpan scans a JPEG's marker segments and returns the byte
+// range [start, end) of the first APP1 segment that carries an Exif
+// header, start pointing at its 0xFF marker byte and end just past its
+// payload. It returns start == -1 if the JPEG is well-formed but has no
+// such segment.
+func findEXIFSegmentSpan(data []byte) (start, end int, err error) {
 	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
-		return nil, errors.New("not a JPEG file (missing SOI marker)")
+		return -1, -1, errors.New("not a JPEG file (missing SOI marker)")
 	}
 
 	pos := 2
 	for pos+2 <= len(data) {
 		if data[pos] != 0xFF {
-			return nil, fmt.Errorf("malformed JPEG: expected marker at offset %d", pos)
+			return -1, -1, fmt.Errorf("malformed JPEG: expected marker at offset %d", pos)
 		}
 		marker := data[pos+1]
+		segStart := pos
 		pos += 2
 
 		// Markers with no length/payload of their own.
@@ -166,16 +184,16 @@ func findEXIFSegment(data []byte) ([]byte, error) {
 
 		segLen := int(data[pos])<<8 | int(data[pos+1])
 		if segLen < 2 || pos+segLen > len(data) {
-			return nil, fmt.Errorf("malformed JPEG segment at offset %d", pos)
+			return -1, -1, fmt.Errorf("malformed JPEG segment at offset %d", pos)
 		}
 		payload := data[pos+2 : pos+segLen]
 
 		if marker == 0xE1 && len(payload) >= 6 && string(payload[:6]) == "Exif\x00\x00" {
-			return payload[6:], nil
+			return segStart, pos + segLen, nil
 		}
 		pos += segLen
 	}
-	return nil, errors.New("no EXIF (APP1) segment found")
+	return -1, -1, nil
 }
 
 // readIFD parses one Image File Directory at offset, returning its tags,
