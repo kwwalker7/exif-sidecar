@@ -19,6 +19,7 @@ type ifdTarget int
 const (
 	ifd0 ifdTarget = iota
 	ifdExif
+	ifdGPS
 )
 
 // Field types for the tags in ifd0TagNames and exifTagNames, keyed by
@@ -64,8 +65,43 @@ var exifTagTypes = map[uint16]uint16{
 	0xA420: typeASCII,
 }
 
+var gpsTagTypes = map[uint16]uint16{
+	0x0000: typeByte,
+	0x0001: typeASCII,
+	0x0002: typeRational,
+	0x0003: typeASCII,
+	0x0004: typeRational,
+	0x0005: typeByte,
+	0x0006: typeRational,
+	0x0007: typeRational,
+	0x0008: typeASCII,
+	0x0009: typeASCII,
+	0x000A: typeASCII,
+	0x000B: typeRational,
+	0x000C: typeASCII,
+	0x000D: typeRational,
+	0x000E: typeASCII,
+	0x000F: typeRational,
+	0x0010: typeASCII,
+	0x0011: typeRational,
+	0x0012: typeASCII,
+	0x0013: typeASCII,
+	0x0014: typeRational,
+	0x0015: typeASCII,
+	0x0016: typeRational,
+	0x0017: typeASCII,
+	0x0018: typeRational,
+	0x0019: typeASCII,
+	0x001A: typeRational,
+	0x001B: typeUndefined,
+	0x001C: typeUndefined,
+	0x001D: typeASCII,
+	0x001E: typeShort,
+}
+
 var ifd0NameToID = reverseTagNames(ifd0TagNames)
 var exifNameToID = reverseTagNames(exifTagNames)
+var gpsNameToID = reverseTagNames(gpsTagNames)
 
 func reverseTagNames(m map[uint16]string) map[string]uint16 {
 	r := make(map[string]uint16, len(m))
@@ -88,6 +124,11 @@ func resolveTagName(name string) (id uint16, typ uint16, target ifdTarget, ok bo
 			return tid, t, ifdExif, true
 		}
 	}
+	if tid, exists := gpsNameToID[name]; exists {
+		if t, exists2 := gpsTagTypes[tid]; exists2 {
+			return tid, t, ifdGPS, true
+		}
+	}
 	return 0, 0, 0, false
 }
 
@@ -99,11 +140,11 @@ type encodedEntry struct {
 }
 
 // BuildEXIF turns sidecar tags back into a TIFF-format EXIF blob: IFD0,
-// plus an Exif SubIFD if any Exif SubIFD tags are present. GPS tags and
-// the IFD1 thumbnail directory aren't produced yet.
+// plus an Exif SubIFD and a GPSInfo IFD if tags for either are present.
+// The IFD1 thumbnail directory isn't produced yet.
 func BuildEXIF(tags []Tag) ([]byte, error) {
 	bo := binary.BigEndian
-	var ifd0Entries, exifEntries []encodedEntry
+	var ifd0Entries, exifEntries, gpsEntries []encodedEntry
 
 	for _, t := range tags {
 		// These are derived from the IFD structure itself (the Exif
@@ -135,19 +176,25 @@ func BuildEXIF(tags []Tag) ([]byte, error) {
 		}
 
 		entry := encodedEntry{id: id, typ: typ, count: count, data: data}
-		if target == ifdExif {
+		switch target {
+		case ifdExif:
 			exifEntries = append(exifEntries, entry)
-		} else {
+		case ifdGPS:
+			gpsEntries = append(gpsEntries, entry)
+		default:
 			ifd0Entries = append(ifd0Entries, entry)
 		}
 	}
 
-	if len(ifd0Entries) == 0 && len(exifEntries) == 0 {
+	if len(ifd0Entries) == 0 && len(exifEntries) == 0 && len(gpsEntries) == 0 {
 		return nil, errors.New("no tags to embed")
 	}
 
 	if len(exifEntries) > 0 {
 		ifd0Entries = append(ifd0Entries, encodedEntry{id: exifIFDPointerTag, typ: typeLong, count: 1, data: make([]byte, 4)})
+	}
+	if len(gpsEntries) > 0 {
+		ifd0Entries = append(ifd0Entries, encodedEntry{id: gpsIFDPointerTag, typ: typeLong, count: 1, data: make([]byte, 4)})
 	}
 
 	header := make([]byte, 8)
@@ -164,12 +211,21 @@ func BuildEXIF(tags []Tag) ([]byte, error) {
 		exifDir, exifOverflow = buildIFDBlock(bo, exifEntries, exifDirOffset, 0)
 	}
 
-	out := make([]byte, 0, len(header)+len(ifd0Dir)+len(ifd0Overflow)+len(exifDir)+len(exifOverflow))
+	var gpsDir, gpsOverflow []byte
+	if len(gpsEntries) > 0 {
+		gpsDirOffset := uint32(8 + len(ifd0Dir) + len(ifd0Overflow) + len(exifDir) + len(exifOverflow))
+		patchEntryValue(ifd0Dir, bo, gpsIFDPointerTag, gpsDirOffset)
+		gpsDir, gpsOverflow = buildIFDBlock(bo, gpsEntries, gpsDirOffset, 0)
+	}
+
+	out := make([]byte, 0, len(header)+len(ifd0Dir)+len(ifd0Overflow)+len(exifDir)+len(exifOverflow)+len(gpsDir)+len(gpsOverflow))
 	out = append(out, header...)
 	out = append(out, ifd0Dir...)
 	out = append(out, ifd0Overflow...)
 	out = append(out, exifDir...)
 	out = append(out, exifOverflow...)
+	out = append(out, gpsDir...)
+	out = append(out, gpsOverflow...)
 	return out, nil
 }
 

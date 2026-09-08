@@ -59,10 +59,9 @@ go build .
 
 ## Status
 
-Both directions are implemented for IFD0 and the Exif SubIFD. GPS tags
-and thumbnail (IFD1) data are read-only gaps for now: `extract` doesn't
-decode them yet, and `embed` drops the raw `GPSInfoIFDPointer` line
-rather than writing back a GPS IFD it didn't build. MakerNote data is
+Both directions are implemented for IFD0, the Exif SubIFD, and the
+GPSInfo IFD. Thumbnail (IFD1) data is a read-only gap for now: `extract`
+doesn't decode it, and `embed` doesn't reproduce it. MakerNote data is
 also not preserved across an embed.
 
 ## License
