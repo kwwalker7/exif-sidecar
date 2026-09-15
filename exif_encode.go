@@ -132,6 +132,32 @@ func resolveTagName(name string) (id uint16, typ uint16, target ifdTarget, ok bo
 	return 0, 0, 0, false
 }
 
+// parseUnknownTagName reverses the "Tag0x...", "ExifTag0x...", and
+// "GPSTag0x..." fallback names readIFD gives tags it has no name for.
+// The prefix is what lets a tag like MakerNote (Exif SubIFD, not in
+// exifTagNames) go back into the IFD it actually came from instead of
+// always landing in IFD0. Unknown tags carry no type information once
+// they've gone through the sidecar, so they're encoded as raw bytes.
+func parseUnknownTagName(name string) (id uint16, typ uint16, target ifdTarget, err error) {
+	var prefix string
+	switch {
+	case strings.HasPrefix(name, "ExifTag0x"):
+		prefix, target = "ExifTag0x", ifdExif
+	case strings.HasPrefix(name, "GPSTag0x"):
+		prefix, target = "GPSTag0x", ifdGPS
+	case strings.HasPrefix(name, "Tag0x"):
+		prefix, target = "Tag0x", ifd0
+	default:
+		return 0, 0, 0, fmt.Errorf("unrecognized tag name %q", name)
+	}
+
+	n, err := strconv.ParseUint(name[len(prefix):], 16, 16)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("unrecognized tag name %q", name)
+	}
+	return uint16(n), typeUndefined, target, nil
+}
+
 type encodedEntry struct {
 	id    uint16
 	typ   uint16
@@ -156,18 +182,11 @@ func BuildEXIF(tags []Tag) ([]byte, error) {
 
 		id, typ, target, ok := resolveTagName(t.Name)
 		if !ok {
-			const prefix = "Tag0x"
-			if !strings.HasPrefix(t.Name, prefix) {
-				return nil, fmt.Errorf("unrecognized tag name %q", t.Name)
-			}
-			n, err := strconv.ParseUint(t.Name[len(prefix):], 16, 16)
+			var err error
+			id, typ, target, err = parseUnknownTagName(t.Name)
 			if err != nil {
-				return nil, fmt.Errorf("unrecognized tag name %q", t.Name)
+				return nil, err
 			}
-			// Unknown tags carry no type information once they've gone
-			// through the sidecar; encode them as raw bytes and place
-			// them in IFD0.
-			id, typ, target = uint16(n), typeUndefined, ifd0
 		}
 
 		data, count, err := encodeValue(bo, typ, t.Value)
