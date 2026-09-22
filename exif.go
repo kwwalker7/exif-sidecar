@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -44,6 +45,14 @@ const exifIFDPointerTag = 0x8769
 // Tag ID pointing at the GPSInfo IFD, which holds location fields.
 const gpsIFDPointerTag = 0x8825
 
+// Tag IDs in IFD1 (the thumbnail directory) that together locate the
+// thumbnail's own JPEG bytes elsewhere in the TIFF blob: an offset and a
+// byte count. They're surfaced as a single "ThumbnailImage" tag instead
+// of the raw offset/length pair, since the offset is meaningless once
+// the tags are outside the file.
+const jpegInterchangeFormatTag = 0x0201
+const jpegInterchangeFormatLengthTag = 0x0202
+
 var ifd0TagNames = map[uint16]string{
 	0x010E: "ImageDescription",
 	0x010F: "Make",
@@ -85,6 +94,17 @@ var exifTagNames = map[uint16]string{
 	0xA420: "ImageUniqueID",
 }
 
+// ifd1TagNames covers the IFD1 fields that accompany a compressed
+// (JPEG) thumbnail, which is what cameras and phones actually write.
+// The rarer uncompressed strip-based thumbnail layout isn't handled;
+// its tags fall through to the generic "ThumbnailTag0x..." naming.
+var ifd1TagNames = map[uint16]string{
+	0x0103: "ThumbnailCompression",
+	0x011A: "ThumbnailXResolution",
+	0x011B: "ThumbnailYResolution",
+	0x0128: "ThumbnailResolutionUnit",
+}
+
 var gpsTagNames = map[uint16]string{
 	0x0000: "GPSVersionID",
 	0x0001: "GPSLatitudeRef",
@@ -120,7 +140,7 @@ var gpsTagNames = map[uint16]string{
 }
 
 // ExtractEXIF reads a JPEG file's APP1 segment and returns the EXIF tags
-// found in IFD0 and the Exif SubIFD.
+// found in IFD0, the Exif SubIFD, the GPSInfo IFD, and IFD1 (thumbnail).
 func ExtractEXIF(data []byte) ([]Tag, error) {
 	tiff, err := findEXIFSegment(data)
 	if err != nil {
@@ -146,13 +166,28 @@ func ExtractEXIF(data []byte) ([]Tag, error) {
 	var tags []Tag
 	seen := map[uint32]bool{}
 	offset := bo.Uint32(tiff[4:8])
+	firstIFD := true
 	for offset != 0 && !seen[offset] {
 		seen[offset] = true
-		entries, next, exifSubIFD, gpsIFD, err := readIFD(tiff, bo, offset, ifd0TagNames, "")
+		// The first IFD in the chain is IFD0; any IFD after it is IFD1,
+		// the thumbnail directory, which uses its own tag names.
+		names, prefix := ifd0TagNames, ""
+		if !firstIFD {
+			names, prefix = ifd1TagNames, "Thumbnail"
+		}
+		entries, next, exifSubIFD, gpsIFD, thumbOffset, thumbLength, err := readIFD(tiff, bo, offset, names, prefix)
 		if err != nil {
 			return nil, err
 		}
 		tags = append(tags, entries...)
+
+		if thumbOffset != 0 && thumbLength != 0 {
+			end := uint64(thumbOffset) + uint64(thumbLength)
+			if end > uint64(len(tiff)) {
+				return nil, fmt.Errorf("thumbnail data at offset %d overruns EXIF data", thumbOffset)
+			}
+			tags = append(tags, Tag{Name: "ThumbnailImage", Value: hex.EncodeToString(tiff[thumbOffset:end])})
+		}
 
 		if exifSubIFD != 0 && !seen[exifSubIFD] {
 			seen[exifSubIFD] = true
@@ -160,7 +195,7 @@ func ExtractEXIF(data []byte) ([]Tag, error) {
 			// register end up here; the "Exif" prefix on the fallback
 			// name is what lets BuildEXIF put them back in the SubIFD
 			// instead of IFD0.
-			subEntries, _, _, _, err := readIFD(tiff, bo, exifSubIFD, exifTagNames, "Exif")
+			subEntries, _, _, _, _, _, err := readIFD(tiff, bo, exifSubIFD, exifTagNames, "Exif")
 			if err != nil {
 				return nil, err
 			}
@@ -169,7 +204,7 @@ func ExtractEXIF(data []byte) ([]Tag, error) {
 
 		if gpsIFD != 0 && !seen[gpsIFD] {
 			seen[gpsIFD] = true
-			gpsEntries, _, _, _, err := readIFD(tiff, bo, gpsIFD, gpsTagNames, "GPS")
+			gpsEntries, _, _, _, _, _, err := readIFD(tiff, bo, gpsIFD, gpsTagNames, "GPS")
 			if err != nil {
 				return nil, err
 			}
@@ -177,6 +212,7 @@ func ExtractEXIF(data []byte) ([]Tag, error) {
 		}
 
 		offset = next
+		firstIFD = false
 	}
 
 	if len(tags) == 0 {
@@ -247,20 +283,22 @@ func findEXIFSegmentSpan(data []byte) (start, end int, err error) {
 }
 
 // readIFD parses one Image File Directory at offset, returning its tags,
-// the offset of the next IFD in the chain (0 if none), and the offsets of
-// the Exif SubIFD and GPSInfo IFD if this directory pointed at either.
+// the offset of the next IFD in the chain (0 if none), the offsets of
+// the Exif SubIFD and GPSInfo IFD if this directory pointed at either,
+// and the offset/length pair from IFD1's JPEGInterchangeFormat tags if
+// this directory pointed at a thumbnail image.
 // unknownPrefix is prepended to the fallback "Tag0x..." name given to
 // tags with no entry in names, so BuildEXIF can tell which IFD an
 // unrecognized tag came from and put it back there.
-func readIFD(tiff []byte, bo binary.ByteOrder, offset uint32, names map[uint16]string, unknownPrefix string) (tags []Tag, next uint32, exifSubIFD uint32, gpsIFD uint32, err error) {
+func readIFD(tiff []byte, bo binary.ByteOrder, offset uint32, names map[uint16]string, unknownPrefix string) (tags []Tag, next uint32, exifSubIFD uint32, gpsIFD uint32, thumbOffset uint32, thumbLength uint32, err error) {
 	if uint64(offset)+2 > uint64(len(tiff)) {
-		return nil, 0, 0, 0, fmt.Errorf("IFD offset %d out of range", offset)
+		return nil, 0, 0, 0, 0, 0, fmt.Errorf("IFD offset %d out of range", offset)
 	}
 	count := bo.Uint16(tiff[offset : offset+2])
 	entriesStart := uint64(offset) + 2
 	entriesEnd := entriesStart + uint64(count)*12
 	if entriesEnd+4 > uint64(len(tiff)) {
-		return nil, 0, 0, 0, fmt.Errorf("IFD at offset %d overruns EXIF data", offset)
+		return nil, 0, 0, 0, 0, 0, fmt.Errorf("IFD at offset %d overruns EXIF data", offset)
 	}
 
 	for i := uint64(0); i < uint64(count); i++ {
@@ -294,6 +332,14 @@ func readIFD(tiff []byte, bo binary.ByteOrder, offset uint32, names map[uint16]s
 			gpsIFD = bo.Uint32(raw)
 			continue
 		}
+		if tag == jpegInterchangeFormatTag && typ == typeLong && cnt == 1 {
+			thumbOffset = bo.Uint32(raw)
+			continue
+		}
+		if tag == jpegInterchangeFormatLengthTag && typ == typeLong && cnt == 1 {
+			thumbLength = bo.Uint32(raw)
+			continue
+		}
 
 		name, known := names[tag]
 		if !known {
@@ -303,7 +349,7 @@ func readIFD(tiff []byte, bo binary.ByteOrder, offset uint32, names map[uint16]s
 	}
 
 	next = bo.Uint32(tiff[entriesEnd : entriesEnd+4])
-	return tags, next, exifSubIFD, gpsIFD, nil
+	return tags, next, exifSubIFD, gpsIFD, thumbOffset, thumbLength, nil
 }
 
 func decodeValue(bo binary.ByteOrder, typ uint16, count uint32, raw []byte) string {

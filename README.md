@@ -48,8 +48,14 @@ FocalLength: 85
 
 Unrecognized tags are still included, labeled by their numeric ID
 (`Tag0x9286` for an IFD0 tag, `ExifTag0x927C` for one in the Exif SubIFD,
-`GPSTag0x001F` for one in the GPSInfo IFD), so nothing silently
-disappears, and `embed` puts each one back in the IFD it came from.
+`GPSTag0x001F` for one in the GPSInfo IFD, `ThumbnailTag0x010F` for one
+in the IFD1 thumbnail directory), so nothing silently disappears, and
+`embed` puts each one back in the IFD it came from.
+
+A JPEG-format thumbnail (the kind cameras and phones actually embed)
+comes out as a single `ThumbnailImage` tag holding the thumbnail's own
+JPEG bytes as hex, alongside a few small `Thumbnail*` metadata tags
+(compression, resolution). `embed` reproduces both from those tags.
 
 ## Building
 
@@ -61,11 +67,11 @@ go build .
 
 ## Status
 
-Both directions are implemented for IFD0, the Exif SubIFD, and the
-GPSInfo IFD. Tags neither side recognizes by name, including MakerNote,
-round-trip as opaque bytes in whichever IFD they were found in. Thumbnail
-(IFD1) data is still a read-only gap: `extract` doesn't decode it, and
-`embed` doesn't reproduce it.
+Both directions are implemented for IFD0, the Exif SubIFD, the GPSInfo
+IFD, and IFD1 (the thumbnail directory, for the common JPEG-thumbnail
+case). Tags neither side recognizes by name, including MakerNote,
+round-trip as opaque bytes in whichever IFD they were found in. There's
+no automated test coverage yet.
 
 ## License
 
